@@ -1,68 +1,158 @@
-const tutorInstructions = `You are Mission AI, a friendly, accurate and patient tutor for Class 10 students. Help with CBSE/NCERT Mathematics, Science, Social Science, English and Hindi, and related school topics. Answer the student's actual question directly. Use English, Hindi or Hinglish to match the student. Explain clearly at age-appropriate level. For numericals show Given, Formula, Substitution, Calculation and Final Answer with units. For literature explain plot, poem, themes, characters, vocabulary and exam-ready points without reproducing long copyrighted textbook passages. For grammar and writing provide correct formats and examples. For exam answers give point-wise marking guidance when useful. Never invent a previous-year question year, official answer, marking scheme or syllabus fact. If uncertain, say so and advise checking current NCERT/CBSE material. Be concise for simple definitions and thorough when long notes are requested.`;
 
-const json = (data, status = 200) => new Response(JSON.stringify(data), {
-  status,
-  headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }
-});
+const MODEL = "gemini-3.8-flash";
+
+const SYSTEM_INSTRUCTION = `
+You are MISSION AI, a friendly and knowledgeable school tutor.
+
+Help students with CBSE Class 10 NCERT:
+- Mathematics
+- Science
+- Social Science
+- English
+- Hindi
+
+Answer the student's actual question directly.
+Use simple language and explain difficult concepts step by step.
+Match the student's language: English, Hindi or Hinglish.
+
+For numerical problems show:
+1. Given data
+2. Formula
+3. Substitution
+4. Calculation
+5. Final answer with units
+
+For literature explain themes, characters, poems and meanings.
+For grammar give rules and examples.
+For exam preparation provide point-wise answers.
+Never invent official PYQs, exam years or marking schemes.
+Be concise for simple questions and detailed when requested.
+`;
+
+function response(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store"
+    }
+  });
+}
 
 export async function onRequestPost({ request, env }) {
   if (!env.GEMINI_API_KEY) {
-    return json({ error: 'Mission AI is not connected yet. Add GEMINI_API_KEY as a Cloudflare secret.' }, 503);
+    return response({
+      error: "Gemini API key is missing. Check Cloudflare Secrets."
+    }, 503);
   }
 
   try {
     const body = await request.json();
-    if (!Array.isArray(body.messages) || body.messages.length < 1 || body.messages.length > 20) {
-      return json({ error: 'Please send between 1 and 20 chat messages.' }, 400);
+
+    if (!Array.isArray(body.messages) || body.messages.length === 0) {
+      return response({
+        error: "Please send a question."
+      }, 400);
     }
 
-    const transcript = body.messages.map((m) => {
-      if (!m || !['user', 'assistant'].includes(m.role) || typeof m.content !== 'string') {
-        throw new Error('Invalid chat message.');
+    if (body.messages.length > 12) {
+      return response({
+        error: "Please start a new chat. This conversation is too long."
+      }, 400);
+    }
+
+    const transcript = body.messages.map(message => {
+      if (
+        !message ||
+        !["user", "assistant"].includes(message.role) ||
+        typeof message.content !== "string"
+      ) {
+        throw new Error("Invalid message format.");
       }
-      return `${m.role === 'assistant' ? 'Mission AI' : 'Student'}: ${m.content.slice(0, 4000)}`;
-    }).join('\n\n');
 
-    if (body.messages[body.messages.length - 1].role !== 'user') {
-      return json({ error: 'The latest message must be from the student.' }, 400);
+      return (
+        (message.role === "user" ? "Student" : "Mission AI") +
+        ": " +
+        message.content.slice(0, 5000)
+      );
+    }).join("\n\n");
+
+    const lastMessage = body.messages[body.messages.length - 1];
+
+    if (lastMessage.role !== "user") {
+      return response({
+        error: "Your latest message must be a student question."
+      }, 400);
     }
 
-    const model = env.GEMINI_MODEL || 'gemini-3.8-flash';
-    const upstream = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', {
-      method: 'POST',
-      headers: {
-        'x-goog-api-key': env.GEMINI_API_KEY,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model,
-        system_instruction: tutorInstructions,
-        input: transcript,
-        store: false,
-        generation_config: { max_output_tokens: 2200 }
-      })
-    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 45000);
+
+    let upstream;
+
+    try {
+      upstream = await fetch(
+        "https://generativelanguage.googleapis.com/v1beta/interactions",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": env.GEMINI_API_KEY
+          },
+          body: JSON.stringify({
+            model: MODEL,
+            input: transcript,
+            system_instruction: SYSTEM_INSTRUCTION,
+            generation_config: {
+              thinking_level: "low",
+              max_output_tokens: 1800
+            },
+            store: false
+          }),
+          signal: controller.signal
+        }
+      );
+    } finally {
+      clearTimeout(timeout);
+    }
 
     const result = await upstream.json().catch(() => ({}));
+
     if (!upstream.ok) {
-      const message = result?.error?.message || `Gemini returned HTTP ${upstream.status}.`;
-      return json({ error: message }, upstream.status === 429 ? 429 : 502);
+      return response({
+        error:
+          result.error?.message ||
+          "Gemini request failed. Please try again."
+      }, upstream.status === 429 ? 429 : 502);
     }
 
     const reply = (result.steps || [])
-      .filter(step => step.type === 'model_output')
+      .filter(step => step.type === "model_output")
       .flatMap(step => step.content || [])
-      .filter(part => part.type === 'text' && typeof part.text === 'string')
-      .map(part => part.text)
-      .join('\n')
+      .filter(part => part.type === "text")
+      .map(part => part.text || "")
+      .join("\n")
       .trim();
 
     if (!reply) {
-      return json({ error: 'The AI returned an empty answer. Please try again.' }, 502);
+      return response({
+        error: "Gemini did not return an answer. Please try again."
+      }, 502);
     }
 
-    return json({ reply, model, provider: 'Google Gemini Interactions API' });
+    return response({
+      reply,
+      provider: "Google Gemini",
+      model: MODEL
+    });
+
   } catch (error) {
-    return json({ error: error.message || 'Could not process that message.' }, 400);
+    const timedOut = error.name === "AbortError";
+
+    return response({
+      error: timedOut
+        ? "Mission AI took too long. Please try again."
+        : "Mission AI error: " + error.message
+    }, timedOut ? 504 : 500);
   }
 }
