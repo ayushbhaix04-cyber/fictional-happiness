@@ -1,0 +1,2 @@
+import {json} from './_utils.js';
+export async function onRequestGet({request,env}){if(!env.BOOKS)return json({error:'Storage is not configured.'},503);const key=new URL(request.url).searchParams.get('key');if(!key||key.includes('..'))return json({error:'Invalid file.'},400);const obj=await env.BOOKS.get(key);if(!obj)return json({error:'File not found.'},404);const headers=new Headers();obj.writeHttpMetadata(headers);headers.set('etag',obj.httpEtag);headers.set('cache-control','public, max-age=3600');return new Response(obj.body,{headers})}
