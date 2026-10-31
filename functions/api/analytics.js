@@ -1,0 +1,2 @@
+import {json,readJSON} from './_utils.js';
+export async function onRequestPost({request,env}){if(!env.DB)return json({ok:true,tracking:false});const d=await readJSON(request);const allowed=['page_view','chapter_open','quiz_attempt'];if(!allowed.includes(d.event))return json({ok:true});const path=String(d.path||'/').slice(0,220);try{await env.DB.prepare('INSERT INTO events(event,path,created_at) VALUES(?,?,?)').bind(d.event,path,Date.now()).run();return json({ok:true})}catch{return json({ok:false},500)}}
